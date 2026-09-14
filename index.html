@@ -2,8 +2,8 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>반짝반짝 도토리 요정</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Jua&family=Gowun+Dodum&display=swap" rel="stylesheet">
@@ -164,10 +164,30 @@
   #timer-pill.low .t-time{ color:var(--ember-bright); }
   @keyframes timer-pulse{ 0%,100%{transform:scale(1);} 50%{transform:scale(1.06);} }
 
+  /* ---------- mission progress badge (live, tag-started time from the PC stopwatch) ---------- */
+  #mission-progress-badge{
+    position:absolute; bottom:calc(66px + env(safe-area-inset-bottom, 0px)); right:14px; z-index:24;
+    display:none; align-items:center; gap:7px;
+    background:rgba(18,10,28,0.78);
+    border:2px solid var(--moss);
+    border-radius:999px;
+    padding:7px 15px 7px 11px;
+    box-shadow:var(--shadow-deep);
+  }
+  #mission-progress-badge.show{ display:flex; }
+  #mission-progress-badge .mp-ico{ font-size:15px; }
+  #mission-progress-badge .mp-time{
+    font-family:"Jua",sans-serif;
+    font-variant-numeric:tabular-nums;
+    font-size:clamp(14px,2.6vw,18px);
+    color:var(--moss);
+    letter-spacing:0.02em;
+  }
+
   /* ---------- teacher gear ---------- */
   #gear-btn{
-    position:absolute; bottom:14px; left:14px; z-index:25;
-    width:38px; height:38px; border-radius:50%;
+    position:absolute; bottom:calc(14px + env(safe-area-inset-bottom, 0px)); left:14px; z-index:25;
+    width:44px; height:44px; border-radius:50%;
     background:rgba(18,10,28,0.55);
     border:1px solid rgba(232,184,75,0.35);
     color:var(--parchment); font-size:17px;
@@ -177,8 +197,8 @@
   #gear-btn:hover, #gear-btn:focus-visible{ opacity:1; transform:rotate(25deg); }
 
   #mute-btn{
-    position:absolute; bottom:14px; right:14px; z-index:25;
-    width:38px; height:38px; border-radius:50%;
+    position:absolute; bottom:calc(14px + env(safe-area-inset-bottom, 0px)); right:14px; z-index:25;
+    width:44px; height:44px; border-radius:50%;
     background:rgba(18,10,28,0.55);
     border:1px solid rgba(232,184,75,0.35);
     color:var(--parchment); font-size:16px;
@@ -278,7 +298,10 @@
   #mission-wrap{
     position:absolute; inset:0; z-index:16;
     display:none; align-items:center; justify-content:center;
-    padding:14vh 5vw 10vh;
+    padding:14vh 5vw calc(10vh + env(safe-area-inset-bottom, 0px));
+    /* keep a one-hand-reachable tap zone on tall phones -- the card itself
+       scrolls if content is longer than this, see .m-card below */
+    touch-action:pan-y;
   }
   #mission-wrap.show{ display:flex; }
   .m-card{
@@ -292,6 +315,8 @@
     animation:box-in 420ms ease both;
     max-height:78vh;
     overflow-y:auto;
+    -webkit-overflow-scrolling:touch;
+    overscroll-behavior:contain;
   }
   .m-eyebrow{
     display:inline-block;
@@ -329,23 +354,26 @@
     border-radius:16px;
     padding:14px 16px;
     color:var(--parchment);
-    font-size:clamp(13.5px,2.2vw,16px);
-    line-height:1.55;
+    font-size:clamp(14.5px,2.4vw,16px);
+    line-height:1.6;
     margin:0 0 16px;
     text-align:left;
   }
   .m-hint-box.show{ display:block; }
   .m-hint-box b{ color:var(--gold-bright); }
   .m-next-btn{
+    min-height:48px;
     background:linear-gradient(180deg, var(--moss), #567c47);
     color:var(--white);
-    font-size:clamp(15px,2.6vw,18px);
+    font-size:clamp(16px,2.8vw,18px);
     padding:14px 30px;
     border-radius:999px;
     box-shadow:0 10px 24px rgba(0,0,0,0.4);
     transition:transform 150ms ease;
   }
   .m-next-btn:active{ transform:scale(0.96); }
+  /* full-width + easier one-thumb tapping specifically inside the mission card */
+  .m-card .m-next-btn{ display:block; width:100%; }
 
   .m-title-only{
     /* full illustration mission title phase */
@@ -788,8 +816,6 @@
   }
 </style>
 
-</head>
-<body>
 <div id="app">
   <div id="stage"><img id="stage-img" src="" alt="" hidden></div>
   <div id="warning-bg"></div>
@@ -798,6 +824,7 @@
 
   <div id="tracker"></div>
   <div id="timer-pill"><span class="t-ico">⏳</span><span class="t-time" id="t-time">20:00</span></div>
+  <div id="mission-progress-badge"><span class="mp-ico">🏃</span><span class="mp-time" id="mp-time">0:00</span></div>
 
   <div id="chapter-splash">
     <div class="cs-card">
@@ -1195,6 +1222,8 @@
   var trackerEl = $("tracker");
   var timerPill = $("timer-pill");
   var timeText = $("t-time");
+  var missionProgressBadge = $("mission-progress-badge");
+  var mpTimeEl = $("mp-time");
 
   var chapterSplash = $("chapter-splash");
   var csEyebrow = $("cs-eyebrow");
@@ -1384,6 +1413,44 @@
       }, 1000);
     }
   }
+
+  /* ============ mission progress badge ============
+     Shows a small live "⏱ 3:12" badge bottom-right while a mission
+     (문제풀이) is on screen, counting up from the moment the PC stopwatch
+     started this team's tag -- separate from the 20-minute countdown
+     above. Backed by a lightweight `mission_progress` row the PC program
+     upserts on tap-start and deletes on tap-stop (see supabase_setup.sql). */
+  var missionProgressStartedAtMs = null;
+  var missionProgressFinished = false;
+  function pollMissionProgress(){
+    if(!supa || !state.teamName) return;
+    try{
+      supa.from("mission_progress").select("started_at").eq("team_name", state.teamName)
+        .order("started_at", {ascending:false}).limit(1)
+        .then(function(res){
+          if(res && !res.error && res.data && res.data.length){
+            missionProgressStartedAtMs = new Date(res.data[0].started_at).getTime();
+            missionProgressFinished = false;
+          } else {
+            // no running row for this team right now (not started yet, or already stopped)
+            missionProgressStartedAtMs = null;
+          }
+        }).catch(function(){});
+    }catch(e){}
+  }
+  function tickMissionProgressBadge(){
+    var scene = scenes[state.sceneIdx];
+    var solvingNow = scene && scene.type === "mission" && state.missionPhase !== "title";
+    if(solvingNow && missionProgressStartedAtMs && !missionProgressFinished){
+      var elapsed = Math.max(0, Math.round((Date.now() - missionProgressStartedAtMs) / 1000));
+      mpTimeEl.textContent = formatTime(elapsed);
+      missionProgressBadge.classList.add("show");
+    } else {
+      missionProgressBadge.classList.remove("show");
+    }
+  }
+  setInterval(pollMissionProgress, 4000);
+  setInterval(tickMissionProgressBadge, 1000);
 
   /* ============ typewriter ============ */
   function typeText(el, text, done){
@@ -1690,6 +1757,7 @@
     titleScreen.style.display = "none";
     spawnSparkles();
     goToScene(0, "title", true);
+    pollMissionProgress();
     sfxAdvance();
   });
 
@@ -1710,6 +1778,9 @@
     teacherPanel.classList.remove("show");
     titleScreen.style.display = "flex";
     teamInput.value = "";
+    missionProgressStartedAtMs = null;
+    missionProgressFinished = false;
+    missionProgressBadge.classList.remove("show");
   }
 
   /* ============ mute ============ */
@@ -2304,5 +2375,4 @@
 })();
 </script>
 
-</body>
 </html>
