@@ -528,6 +528,8 @@
     transition:transform 150ms ease;
   }
   #start-btn:active{ transform:scale(0.96); }
+  #start-btn.waiting{ background:rgba(255,255,255,.12); color:var(--gold-bright); box-shadow:none; cursor:default; }
+  #link-status{ min-height:1.5em; margin:-8px 0 0; color:var(--gold-bright); font-size:13px; text-align:center; }
 
   #admin-btn{
     position:absolute; left:50%; bottom:14px; transform:translateX(-50%);
@@ -943,8 +945,9 @@
   <div id="title-screen">
     <img id="title-logo" src="" alt="반짝반짝 도토리 요정" style="border-radius:20px;">
     <p class="subtitle">요정의 숲을 구하는 꼬마 마법사들의 이야기.<br>수학문제를 풀며 이야기를 함께 진행해요!</p>
-    <input id="team-input" type="text" placeholder="우리 모둠 이름을 적어주세요 (선택)" maxlength="16">
-    <button id="start-btn" type="button">✨ 이야기 시작하기 ✨</button>
+    <input id="team-input" type="text" placeholder="관리자 화면과 같은 팀 이름을 적어주세요" maxlength="20">
+    <button id="start-btn" type="button">🏷️ 태그 시작 기다리기</button>
+    <p id="link-status">팀 이름을 입력한 뒤 버튼을 눌러주세요.</p>
     <button id="admin-btn" type="button">🔐 관리자 페이지</button>
   </div>
 
@@ -1296,6 +1299,7 @@
   var titleScreen = $("title-screen");
   var teamInput = $("team-input");
   var startBtn = $("start-btn");
+  var linkStatus = $("link-status");
 
   var gearBtn = $("gear-btn");
   var muteBtn = $("mute-btn");
@@ -1422,6 +1426,18 @@
      upserts on tap-start and deletes on tap-stop (see supabase_setup.sql). */
   var missionProgressStartedAtMs = null;
   var missionProgressFinished = false;
+  var waitingForAdminStart = false;
+  function beginLinkedStory(startedAt){
+    if(!waitingForAdminStart || titleScreen.style.display === "none") return;
+    waitingForAdminStart = false;
+    missionProgressStartedAtMs = new Date(startedAt).getTime();
+    startBtn.classList.remove("waiting");
+    ensureAudio();
+    titleScreen.style.display = "none";
+    spawnSparkles();
+    goToScene(0, "title", true);
+    sfxAdvance();
+  }
   function pollMissionProgress(){
     if(!supa || !state.teamName) return;
     try{
@@ -1431,6 +1447,7 @@
           if(res && !res.error && res.data && res.data.length){
             missionProgressStartedAtMs = new Date(res.data[0].started_at).getTime();
             missionProgressFinished = false;
+            if(waitingForAdminStart) beginLinkedStory(res.data[0].started_at);
           } else {
             // no running row for this team right now (not started yet, or already stopped)
             missionProgressStartedAtMs = null;
@@ -1439,9 +1456,8 @@
     }catch(e){}
   }
   function tickMissionProgressBadge(){
-    var scene = scenes[state.sceneIdx];
-    var solvingNow = scene && scene.type === "mission" && state.missionPhase !== "title";
-    if(solvingNow && missionProgressStartedAtMs && !missionProgressFinished){
+    var storyOpen = titleScreen.style.display === "none";
+    if(storyOpen && missionProgressStartedAtMs && !missionProgressFinished){
       var elapsed = Math.max(0, Math.round((Date.now() - missionProgressStartedAtMs) / 1000));
       mpTimeEl.textContent = formatTime(elapsed);
       missionProgressBadge.classList.add("show");
@@ -1752,13 +1768,16 @@
 
   /* ============ title screen ============ */
   startBtn.addEventListener("click", function(){
-    ensureAudio();
-    state.teamName = teamInput.value.trim();
-    titleScreen.style.display = "none";
-    spawnSparkles();
-    goToScene(0, "title", true);
+    var name = teamInput.value.trim();
+    if(!name){ linkStatus.textContent = "팀 이름을 먼저 입력해주세요."; teamInput.focus(); return; }
+    state.teamName = name;
+    waitingForAdminStart = true;
+    teamInput.disabled = true;
+    startBtn.disabled = true;
+    startBtn.classList.add("waiting");
+    startBtn.textContent = "⏳ 관리자 태그를 기다리는 중...";
+    linkStatus.textContent = name + " 팀의 태그가 시작되면 이야기가 자동으로 열립니다.";
     pollMissionProgress();
-    sfxAdvance();
   });
 
   function resetAll(){
@@ -1778,6 +1797,12 @@
     teacherPanel.classList.remove("show");
     titleScreen.style.display = "flex";
     teamInput.value = "";
+    teamInput.disabled = false;
+    startBtn.disabled = false;
+    startBtn.classList.remove("waiting");
+    startBtn.textContent = "🏷️ 태그 시작 기다리기";
+    linkStatus.textContent = "팀 이름을 입력한 뒤 버튼을 눌러주세요.";
+    waitingForAdminStart = false;
     missionProgressStartedAtMs = null;
     missionProgressFinished = false;
     missionProgressBadge.classList.remove("show");
