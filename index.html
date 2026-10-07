@@ -177,11 +177,15 @@
   #mission-progress-badge.show{ display:flex; }
   #mission-progress-badge .mp-ico{ font-size:15px; }
   #mission-progress-badge .mp-time{
-    font-family:"Jua",sans-serif;
+    display:inline-block;
+    min-width:5ch;
+    text-align:center;
+    font-family:ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
     font-variant-numeric:tabular-nums;
     font-size:clamp(14px,2.6vw,18px);
     color:var(--moss);
-    letter-spacing:0.02em;
+    letter-spacing:0;
+    line-height:1;
   }
 
   /* ---------- teacher gear ---------- */
@@ -763,6 +767,8 @@
   .story-scene-card{ border:1px solid var(--parchment-edge); background:rgba(255,255,255,0.58); border-radius:15px; padding:11px; }
   .story-scene-head{ display:flex; align-items:center; gap:7px; margin-bottom:8px; }
   .story-scene-title{ flex:1; color:var(--plum); font-family:"Jua",sans-serif; font-size:14px; }
+  .story-page-type{ flex:none; padding:4px 9px; border-radius:999px; background:rgba(61,91,66,0.12); color:var(--forest); border:1px solid rgba(61,91,66,0.2); font-family:"Jua",sans-serif; font-size:11px; }
+  .story-page-type.problem{ background:rgba(224,113,74,0.13); color:#9a402a; border-color:rgba(224,113,74,0.28); }
   .story-scene-head button, .story-page-actions button, .story-add-scene{ background:rgba(74,47,104,0.11); color:var(--plum); border:1px solid rgba(74,47,104,0.18); border-radius:8px; padding:6px 8px; font-size:11px; }
   .story-field{ display:block; margin:7px 0; color:var(--ink-soft); font-size:11px; }
   .story-field input, .story-field textarea{ display:block; width:100%; margin-top:3px; border:1px solid var(--parchment-edge); border-radius:9px; background:#fffdf7; color:var(--ink-text); padding:8px 9px; font-family:"Noto Sans KR",sans-serif; font-size:12.5px; line-height:1.45; }
@@ -1045,7 +1051,7 @@
       </div>
       <div id="admin-list"></div>
       <div id="story-editor">
-        <p class="story-editor-help">문구를 고치거나 원하는 위치에 페이지를 넣을 수 있습니다. 변경 내용은 이 기기에 자동 임시 저장되며, 작업 후 <b>수정본 HTML 받기</b>를 눌러 다른 기기에서도 사용할 완성 파일을 만들어 주세요.</p>
+        <p class="story-editor-help">모든 화면을 <b>1쪽, 2쪽…</b> 순서로 편집합니다. 일반형은 화자와 문구를, 문제형은 힌트와 준비물을 수정할 수 있습니다. 변경 내용은 이 기기에 자동 임시 저장되며, 작업 후 <b>수정본 HTML 받기</b>를 눌러 다른 기기에서도 사용할 완성 파일을 만들어 주세요.</p>
         <div class="story-editor-toolbar">
           <button id="story-save-btn" type="button">💾 지금 저장</button>
           <button id="story-export-html-btn" class="secondary" type="button">⬇ 수정본 HTML 받기</button>
@@ -1577,10 +1583,49 @@
   var missionProgressStartedAtMs = null;
   var missionProgressFinished = false;
   var waitingForAdminStart = false;
+  var missionProgressRunKey = "";
+  var missionProgressBroadcastUntilMs = 0;
+  var missionSyncChannel = null;
+  function cleanTeamName(name){
+    return String(name || "").trim().replace(/\s+/g, " ");
+  }
+  function comparableTeamName(name){
+    return cleanTeamName(name).toLocaleLowerCase("ko-KR");
+  }
+  function setMissionProgressClock(startedAt){
+    var key = String(startedAt || "received-now");
+    if(missionProgressStartedAtMs && missionProgressRunKey === key) return;
+    var now = Date.now();
+    var sourceMs = Date.parse(startedAt);
+    var initialSeconds = 0;
+    if(Number.isFinite(sourceMs)){
+      var diffSeconds = Math.round((now - sourceMs) / 1000);
+      // Different devices can have incorrect clocks. Ignore impossible values
+      // and continue from the moment this device received the start signal.
+      if(diffSeconds >= -5 && diffSeconds <= 24 * 60 * 60){
+        initialSeconds = Math.max(0, diffSeconds);
+      }
+    }
+    missionProgressRunKey = key;
+    missionProgressStartedAtMs = now - initialSeconds * 1000;
+    missionProgressFinished = false;
+  }
+  function clearMissionProgressClock(){
+    missionProgressStartedAtMs = null;
+    missionProgressRunKey = "";
+    missionProgressFinished = true;
+    missionProgressBadge.classList.remove("show");
+  }
+  function formatMissionElapsed(totalSeconds){
+    totalSeconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+    var minutes = Math.floor(totalSeconds / 60);
+    var seconds = totalSeconds % 60;
+    return String(minutes).padStart(2, "0") + ":" + String(seconds).padStart(2, "0");
+  }
   function beginLinkedStory(startedAt){
     if(!waitingForAdminStart || titleScreen.style.display === "none") return;
     waitingForAdminStart = false;
-    missionProgressStartedAtMs = new Date(startedAt).getTime();
+    setMissionProgressClock(startedAt);
     startBtn.classList.remove("waiting");
     ensureAudio();
     titleScreen.style.display = "none";
@@ -1591,30 +1636,68 @@
   function pollMissionProgress(){
     if(!supa || !state.teamName) return;
     try{
-      supa.from("mission_progress").select("started_at").eq("team_name", state.teamName)
-        .order("started_at", {ascending:false}).limit(1)
+      // Compare normalized names on the device so accidental double spaces or
+      // letter case do not break linking between the two apps.
+      supa.from("mission_progress").select("team_name,started_at")
+        .order("started_at", {ascending:false}).limit(100)
         .then(function(res){
-          if(res && !res.error && res.data && res.data.length){
-            missionProgressStartedAtMs = new Date(res.data[0].started_at).getTime();
-            missionProgressFinished = false;
-            if(waitingForAdminStart) beginLinkedStory(res.data[0].started_at);
+          if(res && res.error) throw res.error;
+          var wanted = comparableTeamName(state.teamName);
+          var row = (res && res.data || []).find(function(item){
+            return comparableTeamName(item.team_name) === wanted;
+          });
+          if(row){
+            missionProgressBroadcastUntilMs = 0;
+            setMissionProgressClock(row.started_at);
+            if(waitingForAdminStart) beginLinkedStory(row.started_at);
           } else {
             // no running row for this team right now (not started yet, or already stopped)
-            missionProgressStartedAtMs = null;
+            // A broadcast may arrive just before the database write. Keep that
+            // live clock instead of immediately erasing a valid start signal.
+            if(Date.now() >= missionProgressBroadcastUntilMs){
+              missionProgressStartedAtMs = null;
+              missionProgressRunKey = "";
+            }
           }
-        }).catch(function(){});
+        }).catch(function(err){
+          if(waitingForAdminStart){
+            linkStatus.textContent = "연동 확인에 실패했습니다. 스탑워치 앱의 연결 상태를 확인해주세요.";
+          }
+          if(window.console) console.error("mission_progress poll failed", err);
+        });
     }catch(e){}
+  }
+  function initMissionSyncChannel(){
+    if(!supa || typeof supa.channel !== "function") return;
+    try{
+      missionSyncChannel = supa.channel("mission-sync-v1")
+        .on("broadcast", {event:"mission_started"}, function(message){
+          var payload = message && message.payload || {};
+          if(!state.teamName || comparableTeamName(payload.teamName) !== comparableTeamName(state.teamName)) return;
+          missionProgressBroadcastUntilMs = Date.now() + 4 * 60 * 60 * 1000;
+          setMissionProgressClock(payload.startedAt);
+          if(waitingForAdminStart) beginLinkedStory(payload.startedAt);
+        })
+        .on("broadcast", {event:"mission_stopped"}, function(message){
+          var payload = message && message.payload || {};
+          if(!state.teamName || comparableTeamName(payload.teamName) !== comparableTeamName(state.teamName)) return;
+          missionProgressBroadcastUntilMs = 0;
+          clearMissionProgressClock();
+        })
+        .subscribe();
+    }catch(e){ missionSyncChannel = null; }
   }
   function tickMissionProgressBadge(){
     var storyOpen = titleScreen.style.display === "none";
     if(storyOpen && missionProgressStartedAtMs && !missionProgressFinished){
-      var elapsed = Math.max(0, Math.round((Date.now() - missionProgressStartedAtMs) / 1000));
-      mpTimeEl.textContent = formatTime(elapsed);
+      var elapsed = Math.max(0, Math.floor((Date.now() - missionProgressStartedAtMs) / 1000));
+      mpTimeEl.textContent = formatMissionElapsed(elapsed);
       missionProgressBadge.classList.add("show");
     } else {
       missionProgressBadge.classList.remove("show");
     }
   }
+  initMissionSyncChannel();
   setInterval(pollMissionProgress, 4000);
   setInterval(tickMissionProgressBadge, 1000);
 
@@ -1673,6 +1756,8 @@
   }
 
   /* ============ render current scene ============ */
+  var DEFAULT_CHAPTER_PROMPT = "톡 눌러서 다음으로 넘어가요 ▶";
+  var DEFAULT_ENDING_TEXT = "요정의 숲을 구해줘서 정말 고마워요! 여러분은 진짜 꼬마 마법사예요. ✨";
   function setStageImage(imgName, mode){
     if(imgName){
       stageImg.src = assetUrl(imgName);
@@ -1697,7 +1782,7 @@
       setStageImage(scene.img, "contain");
       dialogueWrap.style.display = "flex";
       speakerTag.classList.remove("show");
-      typeText(dialogueText, "톡 눌러서 다음으로 넘어가요 ▶");
+      typeText(dialogueText, scene.prompt || DEFAULT_CHAPTER_PROMPT);
     }
     else if(scene.type === "dialogue"){
       setStageImage(scene.img);
@@ -1742,7 +1827,7 @@
     else if(scene.type === "ending"){
       setStageImage("s6_2.jpg");
       var name = state.teamName ? (state.teamName + " 팀, ") : "";
-      endMsg.textContent = name + "요정의 숲을 구해줘서 정말 고마워요! 여러분은 진짜 꼬마 마법사예요. ✨";
+      endMsg.textContent = (scene.speaker ? (scene.speaker + "\n") : "") + name + (scene.text || DEFAULT_ENDING_TEXT);
       endingScreen.classList.add("show");
       launchConfetti();
       sfxSuccess();
@@ -1918,8 +2003,13 @@
 
   /* ============ title screen ============ */
   startBtn.addEventListener("click", function(){
-    var name = teamInput.value.trim();
+    var name = cleanTeamName(teamInput.value);
     if(!name){ linkStatus.textContent = "팀 이름을 먼저 입력해주세요."; teamInput.focus(); return; }
+    if(!supa){
+      linkStatus.textContent = "연동 서버를 불러오지 못했습니다. 인터넷 연결 후 새로고침해주세요.";
+      return;
+    }
+    teamInput.value = name;
     state.teamName = name;
     waitingForAdminStart = true;
     teamInput.disabled = true;
@@ -1954,6 +2044,8 @@
     linkStatus.textContent = "팀 이름을 입력한 뒤 버튼을 눌러주세요.";
     waitingForAdminStart = false;
     missionProgressStartedAtMs = null;
+    missionProgressRunKey = "";
+    missionProgressBroadcastUntilMs = 0;
     missionProgressFinished = false;
     missionProgressBadge.classList.remove("show");
   }
@@ -2428,11 +2520,20 @@
 
   /* ============ visual story editor ============ */
   var storySaveTimer = null;
-  var sceneTypeNames = {
-    chapter:"장 제목", dialogue:"이야기", warning:"경고", mission:"임무",
-    spell:"주문", ending:"마지막 화면"
-  };
   function cloneStory(data){ return JSON.parse(JSON.stringify(data)); }
+  function storyEditorPages(){
+    var result = [];
+    scenes.forEach(function(scene, sceneIdx){
+      if(scene.type === "dialogue" || scene.type === "warning"){
+        (scene.pages || []).forEach(function(page, pageIdx){
+          result.push({sceneIdx:sceneIdx, pageIdx:pageIdx, kind:"normal"});
+        });
+      } else {
+        result.push({sceneIdx:sceneIdx, pageIdx:-1, kind:scene.type === "mission" ? "problem" : "normal"});
+      }
+    });
+    return result;
+  }
   function setStoryEditorStatus(message, isError){
     storyEditorStatus.textContent = message || "";
     storyEditorStatus.style.color = isError ? "#a23a24" : "var(--moss)";
@@ -2461,31 +2562,17 @@
       : '<input data-field="'+field+'" value="'+escapeHtml(value || "")+'" '+(extra||"")+'>';
     return '<label class="story-field">'+label+tag+'</label>';
   }
-  function scenePreviewText(scene){
-    if(scene.type === "chapter") return (scene.eyebrow || "") + "\n" + (scene.title || "");
-    if(scene.type === "dialogue" || scene.type === "warning"){
-      return (scene.pages || []).map(function(p){ return (p.speaker ? p.speaker+": " : "") + (p.text || ""); }).join("\n");
-    }
-    if(scene.type === "mission") return "문항 "+scene.num+" · "+(scene.title || "")+"\n"+(scene.hint || "");
-    if(scene.type === "spell") return (scene.narration || "")+"\n"+(scene.word || "");
-    return "엔딩 화면";
-  }
-  var storyPreviewSceneIdx = 0;
-  var storyPreviewPageIdx = 0;
-  function previewPageCount(scene){
-    return (scene && (scene.type === "dialogue" || scene.type === "warning"))
-      ? Math.max(1, (scene.pages || []).length) : 1;
-  }
+  var storyPreviewFlatIdx = 0;
   function renderStoryPreview(){
-    var scene = scenes[storyPreviewSceneIdx];
+    var editorPages = storyEditorPages();
+    if(!editorPages.length) return;
+    storyPreviewFlatIdx = Math.max(0, Math.min(storyPreviewFlatIdx, editorPages.length - 1));
+    var item = editorPages[storyPreviewFlatIdx];
+    var scene = scenes[item.sceneIdx];
     if(!scene) return;
-    var pageCount = previewPageCount(scene);
-    if(storyPreviewPageIdx >= pageCount) storyPreviewPageIdx = pageCount - 1;
-    var page = (scene.pages && scene.pages[storyPreviewPageIdx]) || {};
-    var typeName = sceneTypeNames[scene.type] || scene.type;
-    storyPreviewPosition.textContent = "장면 " + (storyPreviewSceneIdx + 1) + " / " + scenes.length
-      + " · " + typeName
-      + (pageCount > 1 ? (" · 페이지 " + (storyPreviewPageIdx + 1) + " / " + pageCount) : "");
+    var page = item.pageIdx >= 0 && scene.pages ? (scene.pages[item.pageIdx] || {}) : {};
+    storyPreviewPosition.textContent = (storyPreviewFlatIdx + 1) + "쪽 / " + editorPages.length + "쪽 · "
+      + (item.kind === "problem" ? "문제형" : "일반형");
 
     var hasImage = !!scene.img && scene.type !== "warning" && scene.type !== "ending";
     storyPreviewImage.hidden = !hasImage;
@@ -2498,7 +2585,7 @@
     storyPreviewEyebrow.textContent = "";
     if(scene.type === "chapter"){
       storyPreviewEyebrow.textContent = scene.eyebrow || "";
-      storyPreviewText.textContent = scene.title || "";
+      storyPreviewText.textContent = (scene.title || "") + "\n\n" + (scene.prompt || DEFAULT_CHAPTER_PROMPT);
     } else if(scene.type === "dialogue" || scene.type === "warning"){
       if(page.speaker){
         storyPreviewSpeaker.textContent = page.speaker;
@@ -2508,21 +2595,33 @@
       storyPreviewText.textContent = page.text || "";
     } else if(scene.type === "mission"){
       storyPreviewEyebrow.textContent = "문항 " + (scene.num || "");
-      storyPreviewText.textContent = (scene.title || "") + (scene.hint ? ("\n\n💡 " + scene.hint) : "");
+      storyPreviewText.textContent = (scene.title || "")
+        + (scene.hint ? ("\n\n💡 " + scene.hint) : "")
+        + ((scene.materials || []).length ? ("\n\n🎒 " + scene.materials.join(", ")) : "");
     } else if(scene.type === "spell"){
-      storyPreviewEyebrow.textContent = "고대 주문";
-      storyPreviewText.textContent = (scene.narration || "") + (scene.word ? ("\n\n" + scene.word) : "");
+      if(scene.narration){
+        storyPreviewSpeaker.textContent = scene.narration;
+        storyPreviewSpeaker.classList.add("show");
+      }
+      storyPreviewText.textContent = scene.word || "";
     } else {
       storyPreviewEyebrow.textContent = "마지막 이야기";
-      storyPreviewText.textContent = "요정의 숲을 구해줘서 정말 고마워요! 여러분은 진짜 꼬마 마법사예요. ✨";
+      if(scene.speaker){
+        storyPreviewSpeaker.textContent = scene.speaker;
+        storyPreviewSpeaker.classList.add("show");
+      }
+      storyPreviewText.textContent = scene.text || DEFAULT_ENDING_TEXT;
     }
 
-    storyPreviewPrev.disabled = storyPreviewSceneIdx === 0 && storyPreviewPageIdx === 0;
-    storyPreviewNext.disabled = storyPreviewSceneIdx === scenes.length - 1 && storyPreviewPageIdx === pageCount - 1;
+    storyPreviewPrev.disabled = storyPreviewFlatIdx === 0;
+    storyPreviewNext.disabled = storyPreviewFlatIdx === editorPages.length - 1;
   }
-  function openStoryPreview(sceneIdx){
-    storyPreviewSceneIdx = sceneIdx;
-    storyPreviewPageIdx = 0;
+  function openStoryPreview(sceneIdx, pageIdx){
+    var editorPages = storyEditorPages();
+    var found = editorPages.findIndex(function(item){
+      return item.sceneIdx === sceneIdx && item.pageIdx === pageIdx;
+    });
+    storyPreviewFlatIdx = found >= 0 ? found : 0;
     renderStoryPreview();
     storyPreviewModal.classList.add("show");
     storyPreviewModal.setAttribute("aria-hidden", "false");
@@ -2533,18 +2632,8 @@
     storyPreviewImage.removeAttribute("src");
   }
   function moveStoryPreview(direction){
-    var scene = scenes[storyPreviewSceneIdx];
-    var pageCount = previewPageCount(scene);
-    if(direction > 0){
-      if(storyPreviewPageIdx < pageCount - 1) storyPreviewPageIdx++;
-      else if(storyPreviewSceneIdx < scenes.length - 1){ storyPreviewSceneIdx++; storyPreviewPageIdx = 0; }
-    } else {
-      if(storyPreviewPageIdx > 0) storyPreviewPageIdx--;
-      else if(storyPreviewSceneIdx > 0){
-        storyPreviewSceneIdx--;
-        storyPreviewPageIdx = previewPageCount(scenes[storyPreviewSceneIdx]) - 1;
-      }
-    }
+    var lastIndex = storyEditorPages().length - 1;
+    storyPreviewFlatIdx = Math.max(0, Math.min(lastIndex, storyPreviewFlatIdx + direction));
     renderStoryPreview();
   }
   storyPreviewClose.addEventListener("click", closeStoryPreview);
@@ -2557,47 +2646,62 @@
     else if(e.key === "ArrowLeft") moveStoryPreview(-1);
     else if(e.key === "ArrowRight") moveStoryPreview(1);
   });
+  function normalPageFields(scene, page){
+    if(scene.type === "chapter"){
+      return fieldHtml("화자", "eyebrow", scene.eyebrow || "", false)
+        + fieldHtml("문구", "title", scene.title || "", true)
+        + fieldHtml("넘김 안내 문구", "prompt", scene.prompt || DEFAULT_CHAPTER_PROMPT, true);
+    }
+    if(scene.type === "dialogue" || scene.type === "warning"){
+      return fieldHtml("화자 (없으면 빈칸)", "speaker", page.speaker || "", false)
+        + fieldHtml("문구", "text", page.text || "", true);
+    }
+    if(scene.type === "spell"){
+      return fieldHtml("화자", "narration", scene.narration || "", true)
+        + fieldHtml("문구", "word", scene.word || "", true);
+    }
+    if(scene.type === "ending"){
+      return fieldHtml("화자 (없으면 빈칸)", "speaker", scene.speaker || "", false)
+        + fieldHtml("문구", "text", scene.text || DEFAULT_ENDING_TEXT, true);
+    }
+    return fieldHtml("화자 (없으면 빈칸)", "speaker", scene.speaker || "", false)
+      + fieldHtml("문구", "text", scene.text || "", true);
+  }
+  function problemPageFields(scene){
+    return fieldHtml("문제 제목", "title", scene.title || "", true)
+      + fieldHtml("힌트", "hint", scene.hint || "", true)
+      + fieldHtml("준비물 (쉼표로 구분)", "materials", (scene.materials || []).join(", "), true);
+  }
   function renderStoryEditor(){
-    storyEditorList.innerHTML = scenes.map(function(scene, sceneIdx){
+    var editorPages = storyEditorPages();
+    storyEditorList.innerHTML = editorPages.map(function(item, flatIdx){
+      var scene = scenes[item.sceneIdx];
+      var page = item.pageIdx >= 0 && scene.pages ? (scene.pages[item.pageIdx] || {}) : {};
       var body = "";
       if(scene.img !== undefined) body += fieldHtml("그림 파일명", "img", scene.img, false, 'list="story-image-list"');
-      if(scene.type === "chapter"){
-        body += fieldHtml("작은 제목", "eyebrow", scene.eyebrow, false);
-        body += fieldHtml("큰 제목", "title", scene.title, true);
-      } else if(scene.type === "dialogue" || scene.type === "warning"){
-        body += (scene.pages || []).map(function(page, pageIdx){
-          return '<div class="story-page-row" data-page="'+pageIdx+'">'
-            + '<div class="story-page-label">페이지 '+(pageIdx+1)+'</div>'
-            + fieldHtml("화자 (없으면 빈칸)", "speaker", page.speaker || "", false)
-            + fieldHtml("문구", "text", page.text || "", true)
-            + '<div class="story-page-actions">'
-            + '<button type="button" data-action="page-up">↑ 위로</button><button type="button" data-action="page-down">↓ 아래로</button>'
-            + '<button type="button" data-action="page-before">＋ 앞에 삽입</button><button type="button" data-action="page-after">＋ 뒤에 삽입</button>'
-            + '<button type="button" data-action="page-copy">복제</button><button class="danger" type="button" data-action="page-delete">삭제</button>'
-            + '</div></div>';
-        }).join("");
-      } else if(scene.type === "mission"){
-        body += fieldHtml("임무 제목", "title", scene.title, true);
-        body += fieldHtml("힌트", "hint", scene.hint, true);
-        body += fieldHtml("준비물 (쉼표로 구분)", "materials", (scene.materials || []).join(", "), true);
-      } else if(scene.type === "spell"){
-        body += fieldHtml("설명", "narration", scene.narration, true);
-        body += fieldHtml("주문", "word", scene.word, false);
+      body += item.kind === "problem" ? problemPageFields(scene) : normalPageFields(scene, page);
+
+      var pageActions = '<div class="story-page-actions">'
+        + '<button type="button" data-action="page-before">＋ 앞에 일반쪽 삽입</button>'
+        + (scene.type === "ending" ? '' : '<button type="button" data-action="page-after">＋ 뒤에 일반쪽 삽입</button>');
+      if(item.pageIdx >= 0 && (scene.type === "dialogue" || scene.type === "warning")){
+        pageActions += '<button type="button" data-action="page-up">↑ 위로</button>'
+          + '<button type="button" data-action="page-down">↓ 아래로</button>'
+          + '<button type="button" data-action="page-copy">복제</button>'
+          + '<button class="danger" type="button" data-action="page-delete">삭제</button>';
       }
-      return '<section class="story-scene-card" data-scene="'+sceneIdx+'">'
-        + '<div class="story-scene-head"><span class="story-scene-title">'+(sceneIdx+1)+'. '+escapeHtml(sceneTypeNames[scene.type] || scene.type)+'</span>'
-        + '<button type="button" data-action="preview">미리보기</button>'
-        + ((scene.type === "dialogue" || scene.type === "warning") ? '<button type="button" data-action="scene-delete">장면 삭제</button>' : '')
-        + '</div>'
-        + body
-        + (scene.type === "ending" ? '' : '<button class="story-add-scene" type="button" data-action="scene-after">＋ 이 장면 뒤에 새 이야기 페이지</button>')
-        + '</section>';
+      pageActions += '</div>';
+
+      return '<section class="story-scene-card" data-scene="'+item.sceneIdx+'" data-page="'+item.pageIdx+'">'
+        + '<div class="story-scene-head"><span class="story-scene-title">'+(flatIdx+1)+'쪽</span>'
+        + '<span class="story-page-type '+(item.kind === "problem" ? "problem" : "")+'">'+(item.kind === "problem" ? "문제형" : "일반형")+'</span>'
+        + '<button type="button" data-action="preview">미리보기</button></div>'
+        + body + pageActions + '</section>';
     }).join("") + '<datalist id="story-image-list">'+Object.keys(ASSET_MAP).map(function(name){ return '<option value="'+escapeHtml(name)+'">'; }).join("")+'</datalist>';
   }
   function storyTargetInfo(target){
     var card = target.closest(".story-scene-card");
-    var row = target.closest(".story-page-row");
-    return { card:card, sceneIdx:card ? Number(card.dataset.scene) : -1, pageIdx:row ? Number(row.dataset.page) : -1 };
+    return { card:card, sceneIdx:card ? Number(card.dataset.scene) : -1, pageIdx:card ? Number(card.dataset.page) : -1 };
   }
   storyEditorList.addEventListener("input", function(e){
     var field = e.target.dataset.field;
@@ -2605,7 +2709,7 @@
     var info = storyTargetInfo(e.target);
     var scene = scenes[info.sceneIdx];
     if(!scene) return;
-    if(info.pageIdx >= 0){
+    if(info.pageIdx >= 0 && scene.pages && (field === "speaker" || field === "text")){
       var page = scene.pages[info.pageIdx];
       if(field === "speaker"){
         if(e.target.value.trim()) page.speaker = e.target.value;
@@ -2613,9 +2717,23 @@
       } else page[field] = e.target.value;
     } else if(field === "materials"){
       scene.materials = e.target.value.split(",").map(function(v){ return v.trim(); }).filter(Boolean);
+    } else if(field === "speaker"){
+      if(e.target.value.trim()) scene.speaker = e.target.value;
+      else delete scene.speaker;
     } else scene[field] = e.target.value;
     scheduleStorySave();
   });
+  function insertGeneralPage(info, after){
+    var scene = scenes[info.sceneIdx];
+    var newPage = {text:"새로운 이야기 문구를 입력하세요."};
+    if(info.pageIdx >= 0 && scene.pages){
+      scene.pages.splice(info.pageIdx + (after ? 1 : 0), 0, newPage);
+    } else {
+      scenes.splice(info.sceneIdx + (after ? 1 : 0), 0, {
+        type:"dialogue", ch:scene.ch || 0, img:scene.img || "", pages:[newPage]
+      });
+    }
+  }
   storyEditorList.addEventListener("click", function(e){
     var btn = e.target.closest("button[data-action]");
     if(!btn) return;
@@ -2624,26 +2742,22 @@
     var scene = scenes[info.sceneIdx];
     if(!scene) return;
     if(action === "preview"){
-      openStoryPreview(info.sceneIdx);
+      openStoryPreview(info.sceneIdx, info.pageIdx);
       return;
     }
-    if(action === "scene-delete"){
-      if(!window.confirm("이 이야기 장면과 안의 모든 페이지를 삭제할까요?")) return;
-      scenes.splice(info.sceneIdx, 1);
-    } else if(action === "scene-after"){
-      scenes.splice(info.sceneIdx + 1, 0, {type:"dialogue", ch:scene.ch || 0, img:scene.img || "", pages:[{text:"새로운 이야기 문구를 입력하세요."}]});
-    } else {
-      if(info.pageIdx < 0 || !scene.pages) return;
+    if(action === "page-before" || action === "page-after"){
+      insertGeneralPage(info, action === "page-after");
+    } else if(info.pageIdx >= 0 && scene.pages) {
       var pages = scene.pages;
       var page = pages[info.pageIdx];
       if(action === "page-up" && info.pageIdx > 0){ pages.splice(info.pageIdx-1, 0, pages.splice(info.pageIdx,1)[0]); }
       else if(action === "page-down" && info.pageIdx < pages.length-1){ pages.splice(info.pageIdx+1, 0, pages.splice(info.pageIdx,1)[0]); }
-      else if(action === "page-before"){ pages.splice(info.pageIdx, 0, {text:"새로운 문구를 입력하세요."}); }
-      else if(action === "page-after"){ pages.splice(info.pageIdx+1, 0, {text:"새로운 문구를 입력하세요."}); }
       else if(action === "page-copy"){ pages.splice(info.pageIdx+1, 0, cloneStory(page)); }
       else if(action === "page-delete"){
-        if(pages.length <= 1){ setStoryEditorStatus("한 장면에는 페이지가 최소 1개 필요합니다.", true); return; }
-        pages.splice(info.pageIdx, 1);
+        if(pages.length <= 1){
+          if(!window.confirm("이 쪽을 삭제할까요?")) return;
+          scenes.splice(info.sceneIdx, 1);
+        } else pages.splice(info.pageIdx, 1);
       }
     }
     saveStoryEdits(false);
